@@ -1,0 +1,20 @@
+{
+  "$schema": "https://raw.githubusercontent.com/stryker-mutator/stryker-net/master/src/Stryker.Core/Stryker.Core/stryker-config.schema.json",
+  "stryker-config": {
+    "test-projects": [
+      "tests/NottMQ.Tests.Unit/NottMQ.Tests.Unit.csproj"
+    ],
+    "mutate": [
+      "src/NottMQ.Protocol/**/*.cs",
+      "src/NottMQ.Core/**/*.cs"
+    ],
+    "reporters": [
+      "progress",
+      "clear-text",
+      "html"
+    ],
+    "threshold-high": 80,
+    "threshold-low": 70,
+    "threshold-break": 60
+  }
+}
