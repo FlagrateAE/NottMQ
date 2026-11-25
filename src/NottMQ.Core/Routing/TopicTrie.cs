@@ -10,6 +10,7 @@ public sealed class TopicTrie : IDisposable
 {
     private readonly ReaderWriterLockSlim _lock = new(LockRecursionPolicy.NoRecursion);
     private readonly TopicTrieNode _root = new();
+    private readonly Dictionary<string, HashSet<string>> _clientFilters = new(StringComparer.Ordinal);
 
     private int _nodeCount = 1; // Includes root node.
     private int _subscriptionCount;
@@ -109,9 +110,88 @@ public sealed class TopicTrie : IDisposable
             if (current.AddOrUpdateSubscriber(clientId, qos))
             {
                 _subscriptionCount++;
+
+                if (!_clientFilters.TryGetValue(clientId, out HashSet<string>? filters))
+                {
+                    filters = new HashSet<string>(StringComparer.Ordinal);
+                    _clientFilters[clientId] = filters;
+                }
+
+                filters.Add(topicFilter);
             }
 
             return true;
+        }
+        finally
+        {
+            _lock.ExitWriteLock();
+        }
+    }
+
+    /// <summary>
+    /// Removes a client subscription for the specified topic filter and prunes empty trie nodes.
+    /// Returns <c>true</c> if the subscription existed and was removed.
+    /// </summary>
+    public bool Unsubscribe(string clientId, string topicFilter)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(clientId);
+
+        if (!TopicValidator.IsValidTopicFilter(topicFilter))
+        {
+            return false;
+        }
+
+        _lock.EnterWriteLock();
+        try
+        {
+            if (!UnsubscribeInternal(clientId, topicFilter))
+            {
+                return false;
+            }
+
+            if (_clientFilters.TryGetValue(clientId, out HashSet<string>? filters))
+            {
+                filters.Remove(topicFilter);
+                if (filters.Count == 0)
+                {
+                    _clientFilters.Remove(clientId);
+                }
+            }
+
+            return true;
+        }
+        finally
+        {
+            _lock.ExitWriteLock();
+        }
+    }
+
+    /// <summary>
+    /// Removes all subscriptions belonging to <paramref name="clientId"/> and prunes empty trie nodes.
+    /// Returns the number of subscriptions removed.
+    /// </summary>
+    public int UnsubscribeAll(string clientId)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(clientId);
+
+        _lock.EnterWriteLock();
+        try
+        {
+            if (!_clientFilters.Remove(clientId, out HashSet<string>? filters))
+            {
+                return 0;
+            }
+
+            int removed = 0;
+            foreach (string topicFilter in filters)
+            {
+                if (UnsubscribeInternal(clientId, topicFilter))
+                {
+                    removed++;
+                }
+            }
+
+            return removed;
         }
         finally
         {
@@ -168,6 +248,87 @@ public sealed class TopicTrie : IDisposable
         {
             _lock.Dispose();
         }
+    }
+
+    private bool UnsubscribeInternal(string clientId, string topicFilter)
+    {
+        string[] levels = TopicValidator.SplitLevels(topicFilter);
+        var path = new List<(TopicTrieNode Parent, string Level, TopicTrieNode Child)>(levels.Length);
+        TopicTrieNode current = _root;
+
+        for (int i = 0; i < levels.Length; i++)
+        {
+            string level = levels[i];
+            TopicTrieNode? next;
+
+            if (level == "#")
+            {
+                next = current.MultiLevelWildcard;
+                if (next is null)
+                {
+                    return false;
+                }
+
+                path.Add((current, level, next));
+                current = next;
+                break;
+            }
+
+            if (level == "+")
+            {
+                next = current.SingleLevelWildcard;
+                if (next is null)
+                {
+                    return false;
+                }
+
+                path.Add((current, level, next));
+                current = next;
+            }
+            else
+            {
+                if (!current.TryGetChild(level, out next) || next is null)
+                {
+                    return false;
+                }
+
+                path.Add((current, level, next));
+                current = next;
+            }
+        }
+
+        if (!current.RemoveSubscriber(clientId))
+        {
+            return false;
+        }
+
+        _subscriptionCount--;
+
+        for (int i = path.Count - 1; i >= 0; i--)
+        {
+            (TopicTrieNode parent, string level, TopicTrieNode child) = path[i];
+            if (!child.IsEmpty)
+            {
+                break;
+            }
+
+            if (level == "#")
+            {
+                parent.MultiLevelWildcard = null;
+            }
+            else if (level == "+")
+            {
+                parent.SingleLevelWildcard = null;
+            }
+            else
+            {
+                parent.RemoveChild(level);
+            }
+
+            _nodeCount--;
+        }
+
+        return true;
     }
 
     private static void MatchRecursive(
